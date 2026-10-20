@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reverse waterfall</title>
+<style>*{box-sizing:border-box}body{background:#020903;color:#eceee5;font-family:Inter,Arial,sans-serif}main{height:100svh;min-height:560px;position:relative}header{position:absolute;top:40px;left:40px;pointer-events:none}header span,footer{font:10px monospace;letter-spacing:2px;color:#9baf97}h1{font-size:clamp(24px,4vw,42px);font-weight:400;letter-spacing:-1.7px;margin:14px 0 8px}p{font-size:12px;color:#899184}aside{position:absolute;bottom:50px;left:40px;width:220px;padding:20px;background:#09100cdc;border:1px solid #283227;border-radius:10px;backdrop-filter:blur(12px)}label{display:block;font-size:11px;color:#a8b1a2;margin-bottom:18px}output{float:right;color:#eceddf;font:11px monospace}input{display:block;width:100%;margin:12px 0 0;accent-color:#c6b38b;height:3px}button{width:100%;background:#18231a;color:#d9dfd3;border:1px solid #344032;border-radius:5px;padding:9px;cursor:pointer}footer{position:absolute;right:30px;bottom:24px;font-size:8px}@media(max-width:600px){header{left:22px;top:24px}aside{left:22px;bottom:42px;width:180px;padding:14px}footer{right:18px;bottom:16px;font-size:7px}}
+canvas{display:block}#status{position:absolute;top:150px;left:24px;right:24px;color:#c9ba95;font:12px monospace;z-index:5}input{min-height:22px}button{min-height:42px}</style>
+<script type="importmap">{"imports":{"react":"https://esm.sh/react@19.0.0","react/jsx-runtime":"https://esm.sh/react@19.0.0/jsx-runtime","react-dom":"https://esm.sh/react-dom@19.0.0?external=react","react-dom/client":"https://esm.sh/react-dom@19.0.0/client?external=react","three":"https://esm.sh/three@0.180.0","@react-three/fiber":"https://esm.sh/@react-three/fiber@9.3.0?external=react,react-dom,three"}}</script>
+</head><body><div id="root"></div><div id="status">Loading particle engine…</div>
+<script>window.addEventListener('error',()=>document.getElementById('status').textContent='Unable to load the preview. Please refresh or try Safari / Chrome.');window.addEventListener('unhandledrejection',()=>document.getElementById('status').textContent='Unable to load the preview. Please refresh or try Safari / Chrome.');</script>
+<script type="module">
+import React, { useMemo, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Canvas, useFrame } from '@react-three/fiber';
+import * as THREE from 'three';
+const h=React.createElement;
+const vertexShader=`
+  attribute vec4 aSeed;
+  uniform float uTime;
+  uniform float uSpeed;
+  uniform float uSpread;
+  uniform float uSize;
+  uniform float uPixelRatio;
+  varying vec3 vColor;
+  varying float vAlpha;
+
+  vec3 palette(float t) {
+    vec3 red = vec3(0.88, 0.20, 0.055);
+    vec3 gold = vec3(1.0, 0.69, 0.13);
+    vec3 cream = vec3(1.0, 0.92, 0.72);
+    vec3 violet = vec3(0.56, 0.40, 0.94);
+    if (t < 0.36) return mix(red, gold, smoothstep(0.0, 0.36, t));
+    if (t < 0.58) return mix(gold, cream, smoothstep(0.36, 0.58, t));
+    return mix(cream, violet, smoothstep(0.58, 0.88, t));
+  }
+
+  void main() {
+    // Each seed follows a permanent lane; time moves it along the curve.
+    float t = fract(aSeed.x + uTime * uSpeed * mix(0.92, 1.08, aSeed.w));
+    float lane = aSeed.y;
+    float growth = 1.0 - exp(-8.0 * t);
+    float width = (0.018 + 2.35 * growth * growth) * uSpread;
+
+    // A horizontal inlet asymptotically bends into a vertical column.
+    float x = -4.8 + 5.7 * (1.0 - exp(-6.0 * t));
+    float y = -3.4 + 11.4 * t * t * t;
+    float dx = 34.2 * exp(-6.0 * t);
+    float dy = 34.2 * t * t;
+    vec2 normal = normalize(vec2(dy, -dx));
+    vec2 p = vec2(x, y) + normal * lane * width;
+
+    // Fine coherent ripples inside; turbulent spray on the outer edge.
+    float edge = smoothstep(0.55, 1.0, lane);
+    float wave = sin(t * 220.0 + lane * 48.0 + aSeed.z * 2.0);
+    p += normal * wave * (0.009 + edge * 0.055) * growth;
+    float spray = step(0.88, aSeed.w) * edge;
+    p.x += spray * growth * aSeed.z * 0.95;
+    p.y += spray * sin(t * 37.0 + aSeed.z * 80.0) * 0.14;
+    float z = (aSeed.z - 0.5) * 0.30;
+
+    vColor = palette(lane);
+    float sparkle = pow(aSeed.w, 12.0) * edge;
+    vColor = mix(vColor, vec3(1.0, 0.98, 1.0), sparkle);
+    // Fade wraparound at both ends so the loop never flashes.
+    vAlpha = smoothstep(0.0, 0.025, t) * (1.0 - smoothstep(0.93, 1.0, t));
+    vAlpha *= mix(0.42, 0.90, aSeed.z);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, z, 1.0);
+    gl_PointSize = uSize * uPixelRatio * mix(0.55, 1.35, aSeed.z) * (1.0 + sparkle * 0.8);
+  }
+`;
+const fragmentShader=`
+  varying vec3 vColor;
+  varying float vAlpha;
+  void main() {
+    float radius = length(gl_PointCoord - 0.5) * 2.0;
+    if (radius > 1.0) discard;
+    float core = 1.0 - smoothstep(0.18, 1.0, radius);
+    gl_FragColor = vec4(vColor, core * vAlpha);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }
+`;
+function Particles({speed,spread,count,paused}) {
+ const mat=useRef();const phase=useRef(0);
+ const data=useMemo(()=>{
+  const seeds=new Float32Array(count*4);let s=7291;
+  for(let i=0;i<seeds.length;i++){s=(Math.imul(s,1664525)+1013904223)>>>0;seeds[i]=s/4294967296;}
+  return {seeds,positions:new Float32Array(count*3)};
+ },[count]);
+ const uniforms=useMemo(()=>({uTime:{value:0},uSpeed:{value:1},uSpread:{value:1},uSize:{value:2.2},uPixelRatio:{value:1}}),[]);
+ useFrame(({gl,camera,size},dt)=>{
+  if(!paused)phase.current+=Math.min(dt,.05)*speed;
+  if(mat.current){const u=mat.current.uniforms;u.uTime.value=phase.current;u.uSpread.value=spread;u.uPixelRatio.value=gl.getPixelRatio();}
+  const zoom=Math.min(size.width/10.5,size.height/12.5);
+  if(camera.zoom!==zoom){camera.zoom=zoom;camera.updateProjectionMatrix();}
+ });
+ return h('group',{position:[.6,.1,0]},h('points',{frustumCulled:false},
+  h('bufferGeometry',null,h('bufferAttribute',{attach:'attributes-position',args:[data.positions,3]}),h('bufferAttribute',{attach:'attributes-aSeed',args:[data.seeds,4]})),
+  h('shaderMaterial',{ref:mat,uniforms,vertexShader,fragmentShader,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending})
+ ));
+}
+function App(){
+ const [speed,setSpeed]=useState(.12),[spread,setSpread]=useState(1),[count,setCount]=useState(innerWidth<700?35000:65000),[paused,setPaused]=useState(false);
+ const control=(title,value,set,min,max,step,display)=>h('label',{key:title},title,h('output',null,display),h('input',{'aria-label':title,type:'range',min,max,step,value,onChange:e=>set(+e.target.value)}));
+ return h('main',null,
+  h(Canvas,{orthographic:true,camera:{position:[0,0,15],zoom:65,near:.1,far:100},dpr:[1,1.5],gl:{antialias:false,alpha:false},onCreated:()=>{document.getElementById('status').textContent='';}},h('color',{attach:'background',args:['#020903']}),h(Particles,{speed,spread,count,paused})),
+  h('header',null,h('span',null,'PARTICLE STUDY / 001'),h('h1',null,'Reverse waterfall'),h('p',null,'A ribbon of light, flowing upstream.')),
+  h('aside',null,control('Speed',speed,setSpeed,.02,.3,.01,speed.toFixed(2)),control('Spread',spread,setSpread,.3,1.6,.01,spread.toFixed(2)),control('Particles',count,setCount,10000,100000,5000,count.toLocaleString()),h('button',{onClick:()=>setPaused(!paused)},paused?'Resume':'Pause')),
+  h('footer',null,'REACT THREE FIBER · GPU PARTICLES'));
+}
+createRoot(document.getElementById('root')).render(h(App));
+</script></body></html>
